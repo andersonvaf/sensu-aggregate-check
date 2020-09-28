@@ -22,9 +22,11 @@ type Config struct {
 	Namespaces         string
 	APIHost            string
 	APIPort            int
+	APIUrl             string
 	APIUser            string
 	APIPass            string
 	APIKey             string
+	UseAPIUrl          bool
 	Secure             bool
 	TrustedCAFile      string
 	InsecureSkipVerify bool
@@ -59,8 +61,8 @@ var (
 	plugin = Config{
 		PluginConfig: sensu.PluginConfig{
 			Name:     "sensu-aggregate-check",
-			Short:    "The Sensu Go Event Aggregates Check plugin",
-			Keyspace: "sensu.io/plugins/sensu-aggregate-check/config",
+			Short:    "The Sensu Go Event Aggregates Check plugin modified by Reliant",
+			Keyspace: "reliant.io/plugins/sensu-aggregate-check/config",
 		},
 	}
 
@@ -71,7 +73,7 @@ var (
 			Argument:  "check-labels",
 			Shorthand: "l",
 			Default:   "",
-			Usage:     "Sensu Go Event Check Labels to filter by (e.g. 'aggregate=foo')",
+			Usage:     "Comma-delimited list of Sensu Go Event Check Names to be aggregated (e.g. 'check1,check2,check3')",
 			Value:     &plugin.CheckLabels,
 		},
 		&sensu.PluginConfigOption{
@@ -80,7 +82,7 @@ var (
 			Argument:  "entity-labels",
 			Shorthand: "e",
 			Default:   "",
-			Usage:     "Sensu Go Event Entity Labels to filter by (e.g. 'aggregate=foo,app=bar')",
+			Usage:     "Comma-delimited list of Sensu Go Event Entity Names to be aggregated (e.g. 'entity1,entity2')",
 			Value:     &plugin.EntityLabels,
 		},
 		&sensu.PluginConfigOption{
@@ -106,9 +108,18 @@ var (
 			Env:       "",
 			Argument:  "api-port",
 			Shorthand: "p",
-			Default:   8080,
-			Usage:     "Sensu Go Backend API Port (e.g. 4242)",
+			Default:   4567,
+			Usage:     "Sensu Go Backend API Port (e.g. 8080)",
 			Value:     &plugin.APIPort,
+		},
+		&sensu.PluginConfigOption{
+			Path:      "api-url",
+			Env:       "",
+			Argument:  "api-url",
+			Shorthand: "U",
+			Default:   "http://sensu:4567",
+			Usage:     "Sensu Go Backend API URL (e.g. http://sensu:4567)",
+			Value:     &plugin.APIUrl,
 		},
 		&sensu.PluginConfigOption{
 			Path:      "api-user",
@@ -212,11 +223,23 @@ func checkArgs(event *types.Event) (int, error) {
 	if len(plugin.CheckLabels) == 0 {
 		return sensu.CheckStateWarning, fmt.Errorf("--check-labels is required")
 	}
-	if plugin.Secure {
-		plugin.Protocol = "https"
+
+	if len(plugin.APIUrl) != 0 {
+		if strings.Contains(plugin.APIUrl, "https") {
+			plugin.Secure = true
+		} else {
+			plugin.Secure = false
+		}
 	} else {
-		plugin.Protocol = "http"
+		if plugin.Secure {
+			plugin.Protocol = "https"
+		} else {
+			plugin.Protocol = "http"
+		}
+
+		plugin.APIUrl = fmt.Sprintf("%s://%s:%d", plugin.Protocol, plugin.APIHost, plugin.APIPort)
 	}
+
 	if len(plugin.TrustedCAFile) > 0 {
 		caCertPool, err := corev2.LoadCACerts(plugin.TrustedCAFile)
 		if err != nil {
@@ -243,7 +266,7 @@ func authenticate() (Auth, error) {
 
 	req, err := http.NewRequest(
 		"GET",
-		fmt.Sprintf("%s://%s:%d/auth", plugin.Protocol, plugin.APIHost, plugin.APIPort),
+		fmt.Sprintf("%s/auth", plugin.APIUrl),
 		nil,
 	)
 	if err != nil {
@@ -270,67 +293,18 @@ func authenticate() (Auth, error) {
 	err = json.NewDecoder(bytes.NewReader(body)).Decode(&auth)
 
 	if err != nil {
-		trim := 64
-		return auth, fmt.Errorf("error decoding auth response: %v\nFirst %d bytes of response: %s", err, trim, trimBody(body, trim))
+		return auth, fmt.Errorf("error decoding auth response: %v\nResponse: %s", err, body)
 	}
 
 	return auth, err
 }
 
-func parseLabelArg(labelArg string) map[string]string {
-	labels := map[string]string{}
-
-	pairs := strings.Split(labelArg, ",")
-
-	for _, pair := range pairs {
-		parts := strings.Split(pair, "=")
-		if len(parts) == 2 {
-			labels[parts[0]] = parts[1]
-		}
-	}
-
-	return labels
-}
-
-func filterEvents(events []*types.Event) []*types.Event {
-	result := []*types.Event{}
-
-	cLabels := parseLabelArg(plugin.CheckLabels)
-	eLabels := parseLabelArg(plugin.EntityLabels)
-
-	for _, event := range events {
-		selected := true
-
-		for key, value := range cLabels {
-			if event.Check.ObjectMeta.Labels[key] != value {
-				selected = false
-				break
-			}
-		}
-
-		if selected {
-			for key, value := range eLabels {
-				if event.Entity.ObjectMeta.Labels[key] != value {
-					selected = false
-					break
-				}
-			}
-		}
-
-		if selected {
-			result = append(result, event)
-		}
-	}
-
-	return result
-}
-
-func getEvents(auth Auth, namespace string) ([]*types.Event, error) {
+func getEvents(auth Auth, namespace string, entity string, check string) (types.Event, error) {
 	client := http.DefaultClient
 	client.Transport = http.DefaultTransport
 
-	url := fmt.Sprintf("%s://%s:%d/api/core/v2/namespaces/%s/events", plugin.Protocol, plugin.APIHost, plugin.APIPort, namespace)
-	events := []*types.Event{}
+	url := fmt.Sprintf("%s/api/core/v2/namespaces/%s/events/%s/%s", plugin.APIUrl, namespace, entity, check)
+	event := types.Event{}
 
 	if plugin.Secure {
 		client.Transport.(*http.Transport).TLSClientConfig = &tlsConfig
@@ -338,7 +312,7 @@ func getEvents(auth Auth, namespace string) ([]*types.Event, error) {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return events, fmt.Errorf("error creating GET request for %s: %v", url, err)
+		return event, fmt.Errorf("error creating GET request for %s: %v", url, err)
 	}
 
 	if len(plugin.APIKey) == 0 {
@@ -350,28 +324,29 @@ func getEvents(auth Auth, namespace string) ([]*types.Event, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return events, fmt.Errorf("error executing GET request for %s: %v", url, err)
+		return event, fmt.Errorf("error executing GET request for %s: %v", url, err)
 	}
 
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return events, fmt.Errorf("error reading response body during getEvents: %v", err)
+		return event, fmt.Errorf("error reading response body during getEvents: %v", err)
 	}
 
-	err = json.Unmarshal(body, &events)
+	err = json.Unmarshal(body, &event)
 	if err != nil {
-		trim := 64
-		return events, fmt.Errorf("error unmarshalling response during getEvents: %v\nFirst %d bytes of response: %s", err, trim, trimBody(body, trim))
+		return event, fmt.Errorf("error unmarshalling response during getEvents: %v\nResponse: %s", err, body)
 	}
 
-	result := filterEvents(events)
-
-	return result, err
+	return event, err
 }
 
 func executeCheck(event *types.Event) (int, error) {
 	var autherr error
+	var namespaces []string
+	var entity_labels []string
+	var check_labels []string
+
 	auth := Auth{}
 
 	if len(plugin.APIKey) == 0 {
@@ -382,17 +357,23 @@ func executeCheck(event *types.Event) (int, error) {
 		}
 	}
 
-	events := []*types.Event{}
+	namespaces = strings.Split(plugin.Namespaces, ",")
+	entity_labels = strings.Split(plugin.EntityLabels, ",")
+	check_labels = strings.Split(plugin.CheckLabels, ",")
 
-	for _, namespace := range strings.Split(plugin.Namespaces, ",") {
-		selected, err := getEvents(auth, namespace)
+	events := []types.Event{}
 
-		if err != nil {
-			return sensu.CheckStateUnknown, err
-		}
+	for _, namespace := range namespaces {
+		for _, entity_label := range entity_labels {
+			for _, check_label := range check_labels {
+				event, err := getEvents(auth, namespace, entity_label, check_label)
 
-		for _, event := range selected {
-			events = append(events, event)
+				if err != nil {
+					return sensu.CheckStateUnknown, err
+				}
+
+				events = append(events, event)
+			}
 		}
 	}
 
@@ -408,12 +389,16 @@ func executeCheck(event *types.Event) (int, error) {
 		switch event.Check.Status {
 		case 0:
 			counters.Ok++
+			fmt.Printf("[ OK ] %s in %s\n", event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
 		case 1:
 			counters.Warning++
+			fmt.Printf("[ WARNING ] %s in %s\n", event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
 		case 2:
 			counters.Critical++
+			fmt.Printf("[ CRITICAL ] %s in %s\n", event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
 		default:
 			counters.Unknown++
+			fmt.Printf("[ UNKNOWN ] %s in %s\n", event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
 		}
 
 		counters.Total++
@@ -422,7 +407,7 @@ func executeCheck(event *types.Event) (int, error) {
 	counters.Entities = len(entities)
 	counters.Checks = len(checks)
 
-	fmt.Printf("Counters: %+v\n", counters)
+	fmt.Printf("\nCounters: %+v\n", counters)
 
 	if counters.Total == 0 {
 		fmt.Printf("WARNING: No Events returned for Aggregate\n")
@@ -431,17 +416,17 @@ func executeCheck(event *types.Event) (int, error) {
 
 	percent := int((float64(counters.Ok) / float64(counters.Total)) * 100)
 
-	fmt.Printf("Percent OK: %v\n", percent)
+	fmt.Printf("Percent OK: %v\n\n", percent)
 
 	if plugin.CritPercent != 0 {
-		if percent <= plugin.CritPercent {
+		if percent < plugin.CritPercent {
 			fmt.Printf("CRITICAL: Less than %d%% percent OK (%d%%)\n", plugin.CritPercent, percent)
 			return sensu.CheckStateCritical, nil
 		}
 	}
 
 	if plugin.WarnPercent != 0 {
-		if percent <= plugin.WarnPercent {
+		if percent < plugin.WarnPercent {
 			fmt.Printf("WARNING: Less than %d%% percent OK (%d%%)\n", plugin.WarnPercent, percent)
 			return sensu.CheckStateWarning, nil
 		}
@@ -464,11 +449,4 @@ func executeCheck(event *types.Event) (int, error) {
 	fmt.Printf("Everything is OK\n")
 
 	return sensu.CheckStateOK, nil
-}
-func trimBody(body []byte, maxlen int) string {
-        if len(string(body)) < maxlen {
-                maxlen = len(string(body))
-        }
-
-        return string(body)[0:maxlen]
 }

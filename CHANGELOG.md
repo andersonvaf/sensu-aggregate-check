@@ -5,10 +5,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic
 Versioning](http://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.1.5] - 2020-09-28
+
+### Added
+- Add option to use an API URL instead of host and port
 
 ### Changed
-- Updated README to include section on RBAC
+- Events are aggregated using API calls based on entity and check names, instead of using filters
 
 ## [0.1.4] - 2020-04-28
 
