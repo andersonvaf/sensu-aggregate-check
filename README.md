@@ -1,4 +1,3 @@
-[![Sensu Bonsai Asset](https://img.shields.io/badge/Bonsai-Download%20Me-brightgreen.svg?colorB=89C967&logo=sensu)](https://bonsai.sensu.io/assets/sensu/sensu-aggregate-check)
 # Sensu Go Aggregate Check Plugin
 
 - [Overview](#overview)
@@ -16,7 +15,9 @@
 
 ### Overview
 
-An aggregate makes it possible to treat the result of multiple disparate check executions executed across multiple disparate systems as a single result (Event). Aggregates are extremely useful in dynamic environments and/or environments that have a reasonable tolerance for failure. Aggregates should be used when a service can be considered healthy as long as a minimum threshold is satisfied (e.g. are at least 5 healthy web servers? are at least 70% of N processes healthy?).
+This is a fork from [Bonsai's Sensu Go Aggregate Check Plugin](https://github.com/sensu/sensu-aggregate-check), modified to aggregate checks using API calls based on entity and check names, instead of filtering all events.
+
+This plugin allows you to create check aggregates. Suppose that you have web servers serving various applications on different ports: 80, 8080, and 9000. You could create three separate checks, each one monitoring the health of each port. However, if you want to view your web app’s health, these three checks don’t do the best job of providing that insight. These checks are isolated from each other, and each check alerts individually. Instead, it makes more sense to configure this group of checks as an aggregate because you might not care if a check on an individual host fails, but you will certainly care if a large percentage of the checks are in a warning or critical state across a number of hosts.
 
 This plugin allows you to query the Sensu Go Backend API for Events matching certain criteria (labels). This plugin generates a set of counters (e.g. events total, events in an OK state, etc) from the Events query and provides several CLI arguments to evaluate the computed aggregate counters (e.g. --warn-percent=75).
 
@@ -38,31 +39,26 @@ Flags:
   -H, --api-host string          Sensu Go Backend API Host (e.g. 'sensu-backend.example.com') (default "127.0.0.1")
   -k, --api-key string           Sensu Go Backend API Key
   -P, --api-pass string          Sensu Go Backend API Password (default "P@ssw0rd!")
-  -p, --api-port string          Sensu Go Backend API Port (e.g. 4242) (default "8080")
+  -p, --api-port string          Sensu Go Backend API Port (e.g. 4242) (default "4567")
   -u, --api-user string          Sensu Go Backend API User (default "admin")
-  -l, --check-labels string      Sensu Go Event Check Labels to filter by (e.g. 'aggregate=foo')
+  -U, --api-url string           Sensu Go Backend API URL (e.g. http://sensu:4567) (default "http://sensu:4567")
+  -l, --check-labels string      Comma-delimited list of Sensu Go Event Check Names to be aggregated (e.g. 'check1,check2,check3')
+  -e, --entity-labels string     Comma-delimited list of Sensu Go Event Entity Names to be aggregated (e.g. 'entity1,entity2')
+  -n, --namespaces string        Comma-delimited list of Sensu Go Namespaces to query for Events (e.g. 'us-east-1,us-west-2') (default "default")
   -C, --crit-count int           Critical threshold - count of Events in warning state
   -c, --crit-percent int         Critical threshold - % of Events in warning state
-  -e, --entity-labels string     Sensu Go Event Entity Labels to filter by (e.g. 'aggregate=foo,app=bar')
-  -h, --help                     help for sensu-aggregate-check
-  -i, --insecure-skip-verify     skip TLS certificate verification (not recommended!)
-  -n, --namespaces string        Comma-delimited list of Sensu Go Namespaces to query for Events (e.g. 'us-east-1,us-west-2') (default "default")
-  -s, --secure                   Use TLS connection to API
-  -t, --trusted-ca-file string   TLS CA certificate bundle in PEM format
   -W, --warn-count int           Warning threshold - count of Events in warning state
   -w, --warn-percent int         Warning threshold - % of Events in warning state
+  -i, --insecure-skip-verify     skip TLS certificate verification (not recommended!)
+  -s, --secure                   Use TLS connection to API
+  -t, --trusted-ca-file string   TLS CA certificate bundle in PEM format
+  -o, --output-limit int         If the number of checks is greater than the output limit, only the counters will be printed in the output (default 10)
+  -h, --help                     help for sensu-aggregate-check
 ```
 
 ## Configuration
 
 ### Sensu Go
-#### Asset registration
-
-Assets are the best way to make use of this plugin. If you're not using an asset, please consider doing so! If you're using sensuctl 5.13 or later, you can use the following command to add the asset:
-
-`sensuctl asset add sensu/sensu-aggregate-check`
-
-If you're using an earlier version of sensuctl, you can download the asset definition from [this project's Bonsai asset index page][1] or one of the existing [releases][2] or create an executable script from this source.
 
 #### Check definition
 
@@ -75,7 +71,7 @@ metadata:
 spec:
   runtime_assets:
   - sensu-aggregate-check
-  command: sensu-aggregate-check --api-user=foo --api-pass=bar --check-labels='aggregate=healthz,app=dummy' --warn-percent=75 --crit-percent=50
+  command: sensu-aggregate-check --api-user=foo --api-pass=bar --check-labels='check1,check2' --entity-labels='entity1,entity2' --warn-percent=75 --crit-percent=50
   subscriptions:
   - backend
   publish: true

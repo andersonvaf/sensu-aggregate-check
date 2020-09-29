@@ -5,13 +5,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic
 Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [0.1.5] - 2020-09-28
+## [0.2.0] - 2020-09-30
 
 ### Added
 - Add option to use an API URL instead of host and port
+- Add option to limit the number of separate check results that will be printed to the check output
 
 ### Changed
-- Events are aggregated using API calls based on entity and check names, instead of using filters
+- Check and entity labels options in the plugin relate to the check and entity names in Sensu Go
+- When the user provides entity labels, events are collected using separate API calls based on entity and check names
+- Changes the check output to show the result of each separete check, limited to a number of checks
 
 ## [0.1.4] - 2020-04-28
 

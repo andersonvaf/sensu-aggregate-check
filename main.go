@@ -35,6 +35,7 @@ type Config struct {
 	CritPercent        int
 	WarnCount          int
 	CritCount          int
+	OutputLimit        int
 }
 
 // Auth represents the authentication info
@@ -211,6 +212,15 @@ var (
 			Usage:     "TLS CA certificate bundle in PEM format",
 			Value:     &plugin.TrustedCAFile,
 		},
+		&sensu.PluginConfigOption{
+			Path:      "output-limit",
+			Env:       "",
+			Argument:  "output-limit",
+			Shorthand: "o",
+			Default:   10,
+			Usage:     "If the number of checks is greater than the output limit, only the counters will be printed in the output",
+			Value:     &plugin.OutputLimit,
+		},
 	}
 )
 
@@ -299,7 +309,7 @@ func authenticate() (Auth, error) {
 	return auth, err
 }
 
-func getEvents(auth Auth, namespace string, entity string, check string) (types.Event, error) {
+func getEvent(auth Auth, namespace string, entity string, check string) (types.Event, error) {
 	client := http.DefaultClient
 	client.Transport = http.DefaultTransport
 
@@ -341,6 +351,82 @@ func getEvents(auth Auth, namespace string, entity string, check string) (types.
 	return event, err
 }
 
+func getAllEvents(auth Auth, namespace string) ([]types.Event, error) {
+	client := http.DefaultClient
+	client.Transport = http.DefaultTransport
+
+	url := fmt.Sprintf("%s/api/core/v2/namespaces/%s/events", plugin.APIUrl, namespace)
+	events := []types.Event{}
+
+	if plugin.Secure {
+		client.Transport.(*http.Transport).TLSClientConfig = &tlsConfig
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return events, fmt.Errorf("error creating GET request for %s: %v", url, err)
+	}
+
+	if len(plugin.APIKey) == 0 {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", auth.AccessToken))
+	} else {
+		req.Header.Set("Authorization", fmt.Sprintf("Key %s", plugin.APIKey))
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return events, fmt.Errorf("error executing GET request for %s: %v", url, err)
+	}
+
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return events, fmt.Errorf("error reading response body during getEvents: %v", err)
+	}
+
+	err = json.Unmarshal(body, &events)
+	if err != nil {
+		return events, fmt.Errorf("error unmarshalling response during getEvents: %v\nResponse: %s", err, body)
+	}
+	result := filterEvents(events)
+
+	return result, err
+}
+
+func filterEvents(events []types.Event) []types.Event {
+	result := []types.Event{}
+
+	cLabels := strings.Split(plugin.CheckLabels, ",")
+	eLabels := strings.Split(plugin.EntityLabels, ",")
+
+	for _, event := range events {
+		selected := false
+
+		for _, label := range cLabels {
+			if event.Check.ObjectMeta.Name == label {
+				selected = true
+				break
+			}
+		}
+
+		if selected {
+			for _, label := range eLabels {
+				if event.Entity.ObjectMeta.Name == label {
+					selected = true
+					break
+				}
+			}
+		}
+
+		if selected {
+			result = append(result, event)
+		}
+	}
+
+	return result
+}
+
 func executeCheck(event *types.Event) (int, error) {
 	var autherr error
 	var namespaces []string
@@ -358,47 +444,78 @@ func executeCheck(event *types.Event) (int, error) {
 	}
 
 	namespaces = strings.Split(plugin.Namespaces, ",")
-	entity_labels = strings.Split(plugin.EntityLabels, ",")
 	check_labels = strings.Split(plugin.CheckLabels, ",")
 
 	events := []types.Event{}
 
-	for _, namespace := range namespaces {
-		for _, entity_label := range entity_labels {
-			for _, check_label := range check_labels {
-				event, err := getEvents(auth, namespace, entity_label, check_label)
+	counters := Counters{}
 
-				if err != nil {
-					return sensu.CheckStateUnknown, err
-				}
+	if len(plugin.EntityLabels) == 0 {
 
+		for _, namespace := range strings.Split(plugin.Namespaces, ",") {
+			selected, err := getAllEvents(auth, namespace)
+
+			if err != nil {
+				return sensu.CheckStateUnknown, err
+			}
+
+			for _, event := range selected {
 				events = append(events, event)
+			}
+		}
+
+	} else {
+
+		entity_labels = strings.Split(plugin.EntityLabels, ",")
+
+		for _, namespace := range namespaces {
+			for _, entity_label := range entity_labels {
+				for _, check_label := range check_labels {
+					event, err := getEvent(auth, namespace, entity_label, check_label)
+
+					if err != nil {
+						return sensu.CheckStateUnknown, err
+					}
+
+					if event.Entity == nil {
+						counters.Unknown++
+						counters.Total++
+						fmt.Printf("[ UNKNOWN ] Is %s subscribed to %s ?\n", entity_label, check_label)
+					} else {
+						events = append(events, event)
+					}
+				}
 			}
 		}
 	}
 
-	counters := Counters{}
-
 	entities := map[string]string{}
 	checks := map[string]string{}
+
+	eventsTotal := len(events)
 
 	for _, event := range events {
 		entities[event.Entity.ObjectMeta.Name] = ""
 		checks[event.Check.ObjectMeta.Name] = ""
+		status := ""
 
 		switch event.Check.Status {
 		case 0:
 			counters.Ok++
-			fmt.Printf("[ OK ] %s in %s\n", event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
+			status = "OK"
 		case 1:
 			counters.Warning++
-			fmt.Printf("[ WARNING ] %s in %s\n", event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
+			status = "WARNING"
 		case 2:
 			counters.Critical++
-			fmt.Printf("[ CRITICAL ] %s in %s\n", event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
+			status = "CRITICAL"
 		default:
 			counters.Unknown++
-			fmt.Printf("[ UNKNOWN ] %s in %s\n", event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
+			status = "UNKNOWN"
+		}
+
+		if eventsTotal <= plugin.OutputLimit {
+			fmt.Printf("[ %s ] %s in %s\n", status, event.Check.ObjectMeta.Name, event.Entity.ObjectMeta.Name)
 		}
 
 		counters.Total++
